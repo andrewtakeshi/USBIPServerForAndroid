@@ -87,6 +87,13 @@ public class UsbControlHelper {
 			for (int i = 0; i < deviceContext.device.getConfigurationCount(); i++) {
 				UsbConfiguration config = deviceContext.device.getConfiguration(i);
 				if (config.getId() == value) {
+					// If this is already the active configuration, skip the reconfiguration
+					if (deviceContext.activeConfiguration != null && 
+						deviceContext.activeConfiguration.getId() == value) {
+						System.out.println("Configuration " + value + " already active, skipping reconfiguration");
+						return true;
+					}
+
 					// If we have a current config, we need unclaim all interfaces to allow the
 					// configuration change to work properly.
 					if (deviceContext.activeConfiguration != null) {
@@ -134,15 +141,21 @@ public class UsbControlHelper {
 			System.err.printf("SET_CONFIGURATION specified invalid configuration: %d\n", value);
 		}
 		else if (requestType == SET_INTERFACE_REQUEST_TYPE && request == SET_INTERFACE_REQUEST) {
-			System.out.println("Handling SET_INTERFACE via Android API");
+			System.out.printf("Handling SET_INTERFACE via Android API (iface=%d, alt=%d)\n", index, value);
 
 			if (deviceContext.activeConfiguration != null) {
 				for (int i = 0; i < deviceContext.activeConfiguration.getInterfaceCount(); i++) {
 					UsbInterface iface = deviceContext.activeConfiguration.getInterface(i);
 					if (iface.getId() == index && iface.getAlternateSetting() == value) {
-						if (!deviceContext.devConn.setInterface(iface)) {
-							System.err.println("Unable to set interface: "+iface.getId());
+						// Skip if already at the requested alternate setting 0
+						// Calling setInterface unnecessarily can reset data toggles
+						// and interfere with kernel drivers
+						if (value == 0) {
+							System.out.printf("setInterface(%d, alt=0): skipped (already default)\n", iface.getId());
+							return true;
 						}
+						boolean ok = deviceContext.devConn.setInterface(iface);
+						System.out.printf("setInterface(%d, alt=%d): %s\n", iface.getId(), iface.getAlternateSetting(), ok ? "OK" : "FAILED");
 						return true;
 					}
 				}

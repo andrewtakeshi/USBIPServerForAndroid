@@ -13,6 +13,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import org.cgutman.usbip.config.UsbIpConfig;
+import org.cgutman.usbip.jni.UsbLib;
 import org.cgutman.usbip.server.UsbDeviceInfo;
 import org.cgutman.usbip.server.UsbIpServer;
 import org.cgutman.usbip.server.UsbRequestHandler;
@@ -38,6 +39,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.hardware.usb.UsbConfiguration;
 import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
@@ -69,7 +71,7 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 	private WifiLock highPerfWifiLock;
 	private WifiLock lowLatencyWifiLock;
 	
-	private static final boolean DEBUG = false;
+	private static final boolean DEBUG = true;
 	
 	private static final int NOTIFICATION_ID = 100;
 
@@ -89,9 +91,9 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 					dev = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
 				}
 
-				synchronized (dev) {
+				synchronized (permission) {
 					permission.put(dev.getDeviceId(), intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false));
-					dev.notifyAll();
+					permission.notifyAll();
 				}
 			}
 		}
@@ -316,8 +318,10 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 		}
 		
 		// Return the lowest speed that we're compatible with
-		System.out.printf("Speed heuristics for device %d left us with 0x%x\n",
-				dev.getDeviceId(), possibleSpeeds);
+		if (DEBUG) {
+			System.out.printf("Speed heuristics for device %d left us with 0x%x\n",
+					dev.getDeviceId(), possibleSpeeds);
+		}
 
 		if ((possibleSpeeds & FLAG_POSSIBLE_SPEED_LOW) != 0) {
 			return UsbIpDevice.USB_SPEED_LOW;
@@ -387,10 +391,16 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 		ipDev.bDeviceSubClass = (byte) dev.getDeviceSubclass();
 		ipDev.bDeviceProtocol = (byte) dev.getDeviceProtocol();
 
-		ipDev.bConfigurationValue = 0;
+		ipDev.bConfigurationValue = (byte) (dev.getConfigurationCount() > 0 ?
+				dev.getConfiguration(0).getId() : 0);
 		ipDev.bNumConfigurations = (byte) dev.getConfigurationCount();
 
 		ipDev.bNumInterfaces = (byte) dev.getInterfaceCount();
+		
+		if (DEBUG) {
+			System.out.printf("getInfoForDevice: vid=%04x pid=%04x configValue=%d numConfigs=%d numIfaces=%d\n",
+					dev.getVendorId(), dev.getProductId(), ipDev.bConfigurationValue, ipDev.bNumConfigurations, ipDev.bNumInterfaces);
+		}
 		
 		info.dev = ipDev;
 		info.interfaces = new UsbIpInterface[ipDev.bNumInterfaces];
@@ -496,14 +506,22 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 				
 				if (selectedEndpoint.getType() == UsbConstants.USB_ENDPOINT_XFER_BULK) {
 					if (DEBUG) {
-						System.out.printf("Bulk transfer - %d bytes %s on EP %d\n",
-								buff.array().length, msg.direction == UsbIpDevicePacket.USBIP_DIR_IN ? "in" : "out",
-										selectedEndpoint.getEndpointNumber());
+						System.out.printf("Bulk %s EP 0x%02x, %d bytes, seq=%d\n",
+								msg.direction == UsbIpDevicePacket.USBIP_DIR_IN ? "IN" : "OUT",
+								selectedEndpoint.getAddress(), buff.array().length, msg.seqNum);
 					}
 					
 					int res;
 					do {
 						res = XferUtils.doBulkTransfer(context.devConn, selectedEndpoint, buff.array(), 1000);
+						
+						if (res == -110) {
+							if (DEBUG) {
+								System.out.printf("Bulk %s EP 0x%02x timeout, retrying (seq=%d)\n",
+										msg.direction == UsbIpDevicePacket.USBIP_DIR_IN ? "IN" : "OUT",
+										selectedEndpoint.getAddress(), msg.seqNum);
+							}
+						}
 						
 						if (context.requestPool.isShutdown()) {
 							// Bail if the queue is being torn down
@@ -517,8 +535,9 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 					} while (res == -110); // ETIMEDOUT
 					
 					if (DEBUG) {
-						System.out.printf("Bulk transfer complete with %d bytes (wanted %d)\n",
-								res, msg.transferBufferLength);
+						System.out.printf("Bulk %s EP 0x%02x complete: res=%d (wanted %d), seq=%d\n",
+								msg.direction == UsbIpDevicePacket.USBIP_DIR_IN ? "IN" : "OUT",
+								selectedEndpoint.getAddress(), res, msg.transferBufferLength, msg.seqNum);
 					}
 
 					if (!context.activeMessages.remove(msg)) {
@@ -527,12 +546,17 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 					}
 					
 					if (res < 0) {
-						// If the request failed, let's see if the device is still around
-						UsbDevice dev = getDevice(deviceId);
-						if (dev == null) {
-							// The device is gone, so terminate the client
-							server.killClient(s);
-							return;
+						// Only check device presence for ENODEV
+						if (res == -19) {
+							System.err.printf("Bulk transfer got ENODEV on EP %d, checking device %d presence\n",
+									selectedEndpoint.getEndpointNumber(), deviceId);
+							UsbDevice dev = getDevice(deviceId);
+							if (dev == null) {
+								System.err.println("Device gone, killing client");
+								server.killClient(s);
+								return;
+							}
+							System.err.println("Device still present despite ENODEV");
 						}
 
 						reply.status = res;
@@ -579,12 +603,13 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 					if (res < 0) {
 						reply.status = res;
 
-						// If the request failed, let's see if the device is still around
-						UsbDevice dev = getDevice(deviceId);
-						if (dev == null) {
-							// The device is gone, so terminate the client
-							server.killClient(s);
-							return;
+						// Only check device presence for ENODEV
+						if (res == -19) {
+							UsbDevice dev = getDevice(deviceId);
+							if (dev == null) {
+								server.killClient(s);
+								return;
+							}
 						}
 					}
 					else {
@@ -624,11 +649,11 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 			// This is little endian
 			ByteBuffer bb = ByteBuffer.wrap(msg.setup).order(ByteOrder.LITTLE_ENDIAN);
 			
-			byte requestType = bb.get();
-			byte request = bb.get();
-			short value = bb.getShort();
-			short index = bb.getShort();
-			short length = bb.getShort();
+			final byte requestType = bb.get();
+			final byte request = bb.get();
+			final short value = bb.getShort();
+			final short index = bb.getShort();
+			final short length = bb.getShort();
 			
 			if (length != 0) {
 				reply.inData = new byte[length];
@@ -636,54 +661,68 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 
 			// This message is now active
 			context.activeMessages.add(msg);
-			
-			int res;
 
-			// We have to handle certain control requests (SET_CONFIGURATION/SET_INTERFACE) by calling
-			// Android APIs rather than just submitting the URB directly to the device
-			if (!UsbControlHelper.handleInternalControlTransfer(context, requestType, request, value, index)) {
-				do {
-					res = XferUtils.doControlTransfer(devConn, requestType, request, value, index,
-							(requestType & 0x80) != 0 ? reply.inData : msg.outData, length, 1000);
+			// Dispatch control transfers asynchronously so the client thread
+			// stays free to process UNLINK requests during long timeouts
+			final UsbIpSubmitUrbReply ctrlReply = reply;
+			context.requestPool.submit(new Runnable() {
+				@Override
+				public void run() {
+					int res;
 
-					if (context.requestPool.isShutdown()) {
-						// Bail if the queue is being torn down
+					// We have to handle certain control requests (SET_CONFIGURATION/SET_INTERFACE) by calling
+					// Android APIs rather than just submitting the URB directly to the device
+					if (!UsbControlHelper.handleInternalControlTransfer(context, requestType, request, value, index)) {
+						// Use the client's interval as timeout, with a minimum of 5000ms
+						// (matches Linux kernel's USB_CTRL_GET_TIMEOUT)
+						int timeout = msg.interval > 0 ? msg.interval : 5000;
+						if (DEBUG) {
+							System.out.printf("Control transfer: interval=%d, timeout=%d, SETUP: %02x %02x %04x %04x %04x\n",
+									msg.interval, timeout, requestType & 0xFF, request & 0xFF, value & 0xFFFF, index & 0xFFFF, length & 0xFFFF);
+						}
+						res = XferUtils.doControlTransfer(devConn, requestType, request, value, index,
+								(requestType & 0x80) != 0 ? ctrlReply.inData : msg.outData, length, timeout);
+						if (DEBUG || res < 0) {
+							System.out.printf("Control transfer result: %d\n", res);
+						}
+
+						if (context.requestPool.isShutdown()) {
+							return;
+						}
+
+						if (!context.activeMessages.contains(msg)) {
+							return;
+						}
+					}
+					else {
+						res = 0;
+					}
+
+					if (!context.activeMessages.remove(msg)) {
 						return;
 					}
 
-					if (!context.activeMessages.contains(msg)) {
-						// Somebody cancelled the URB, return without responding
-						return;
+					if (res < 0) {
+						if (res == -19) { // ENODEV
+							System.err.printf("Control transfer got ENODEV, checking device %d presence\n", deviceId);
+							UsbDevice dev = getDevice(deviceId);
+							if (dev == null) {
+								System.err.println("Device gone, killing client");
+								server.killClient(s);
+								return;
+							}
+						}
+
+						ctrlReply.status = res;
 					}
-				} while (res == -110); // ETIMEDOUT
-			}
-			else {
-				// Handled the request internally
-				res = 0;
-			}
-
-			if (!context.activeMessages.remove(msg)) {
-				// Somebody cancelled the URB, return without responding
-				return;
-			}
-
-			if (res < 0) {
-				// If the request failed, let's see if the device is still around
-				UsbDevice dev = getDevice(deviceId);
-				if (dev == null) {
-					// The device is gone, so terminate the client
-					server.killClient(s);
-					return;
+					else {
+						ctrlReply.actualLength = res;
+						ctrlReply.status = ProtoDefs.ST_OK;
+					}
+					
+					sendReply(s, ctrlReply, ctrlReply.status);
 				}
-
-				reply.status = res;
-			}
-			else {
-				reply.actualLength = res;
-				reply.status = ProtoDefs.ST_OK;
-			}
-			
-			sendReply(s, reply, reply.status);
+			});
 		}
 		else {
 			// Find the correct endpoint
@@ -754,43 +793,112 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 	public boolean attachToDevice(Socket s, String busId) {
 		UsbDevice dev = getDevice(busId);
 		if (dev == null) {
+			System.err.println("attachToDevice: device not found for busId " + busId);
 			return false;
 		}
+		
+		System.out.printf("attachToDevice: %s (id=%d, vid=%04x, pid=%04x, class=%d)\n",
+				busId, dev.getDeviceId(), dev.getVendorId(), dev.getProductId(), dev.getDeviceClass());
 		
 		if (connections.get(dev.getDeviceId()) != null) {
-			// Already attached
+			System.err.println("attachToDevice: already attached");
 			return false;
 		}
 		
+		System.out.printf("attachToDevice: hasPermission=%b\n", usbManager.hasPermission(dev));
 		if (!usbManager.hasPermission(dev)) {
-			// Try to get permission from the user
-			permission.put(dev.getDeviceId(), null);
+			System.out.println("attachToDevice: requesting USB permission");
+			int deviceId = dev.getDeviceId();
+			permission.put(deviceId, null);
 			usbManager.requestPermission(dev, usbPermissionIntent);
-			synchronized (dev) {
-				while (permission.get(dev.getDeviceId()) == null) {
+			synchronized (permission) {
+				long deadline = System.currentTimeMillis() + 30000;
+				while (permission.get(deviceId) == null) {
+					long remaining = deadline - System.currentTimeMillis();
+					if (remaining <= 0) {
+						System.err.println("attachToDevice: permission request timed out");
+						return false;
+					}
 					try {
-						dev.wait(1000);
+						permission.wait(remaining);
 					} catch (InterruptedException e) {
 						return false;
 					}
 				}
 			}
 			
-			// User may have rejected this
-			if (!permission.get(dev.getDeviceId())) {
+			if (!permission.get(deviceId)) {
+				System.err.println("attachToDevice: permission denied by user");
 				return false;
 			}
+			System.out.println("attachToDevice: permission granted");
 		}
 		
 		UsbDeviceConnection devConn = usbManager.openDevice(dev);
 		if (devConn == null) {
+			System.err.println("attachToDevice: openDevice failed");
 			return false;
 		}
+		System.out.printf("attachToDevice: opened device, fd=%d\n", devConn.getFileDescriptor());
 		
 		// Create a context for this attachment
 		AttachedDeviceContext context = new AttachedDeviceContext();
 		context.devConn = devConn;
 		context.device = dev;
+		
+		// Set initial configuration if device has one
+		if (dev.getConfigurationCount() > 0) {
+			UsbConfiguration config = dev.getConfiguration(0);
+			context.activeConfiguration = config;
+			System.out.printf("attachToDevice: config %d, %d interfaces\n",
+					config.getId(), config.getInterfaceCount());
+			
+			// Build endpoint cache
+			context.activeConfigurationEndpointsByNumDir = new SparseArray<>();
+			for (int i = 0; i < config.getInterfaceCount(); i++) {
+				UsbInterface iface = config.getInterface(i);
+				for (int j = 0; j < iface.getEndpointCount(); j++) {
+					UsbEndpoint endp = iface.getEndpoint(j);
+					context.activeConfigurationEndpointsByNumDir.put(
+							endp.getDirection() | endp.getEndpointNumber(),
+							endp);
+				}
+			}
+			
+			// Reset the device to clear any stale state from previous drivers
+			int resetRes = UsbLib.resetDevice(devConn.getFileDescriptor());
+			System.out.printf("Reset device: %s\n", resetRes == 0 ? "OK" : "err=" + resetRes);
+			
+			// Claim all interfaces
+			for (int i = 0; i < config.getInterfaceCount(); i++) {
+				UsbInterface iface = config.getInterface(i);
+				
+				// Explicitly disconnect kernel driver (e.g. usb-storage) before claiming
+				int disconnRes = UsbLib.disconnectKernelDriver(devConn.getFileDescriptor(), iface.getId());
+				System.out.printf("Disconnect kernel driver iface %d: %s\n", iface.getId(),
+						disconnRes == 0 ? "OK" : "err=" + disconnRes);
+				
+				boolean claimed = devConn.claimInterface(iface, true);
+				System.out.printf("Claim interface %d (force=true): %s\n", iface.getId(), claimed ? "OK" : "FAILED");
+				
+				// Reset all endpoints to clear any stale state
+				// left by kernel drivers (e.g. usb-storage)
+				if (claimed) {
+					for (int j = 0; j < iface.getEndpointCount(); j++) {
+						UsbEndpoint endp = iface.getEndpoint(j);
+						int res = UsbLib.resetEp(devConn.getFileDescriptor(), endp.getAddress());
+						System.out.printf("Reset EP 0x%02x: %s\n", endp.getAddress(),
+								res == 0 ? "OK" : "err=" + res);
+						res = UsbLib.clearHalt(devConn.getFileDescriptor(), endp.getAddress());
+						System.out.printf("Clear halt EP 0x%02x: %s\n", endp.getAddress(),
+								res == 0 ? "OK" : "err=" + res);
+					}
+				}
+			}
+		}
+		else {
+			System.err.println("attachToDevice: device has no configurations!");
+		}
 		
 		// Count all endpoints on all interfaces
 		int endpointCount = 0;
@@ -798,8 +906,8 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 			endpointCount += dev.getInterface(i).getEndpointCount();
 		}
 		
-		// Use a thread pool with a thread per endpoint
-		context.requestPool = new ThreadPoolExecutor(endpointCount, endpointCount,
+		// Use a thread pool with a thread per endpoint + 1 for control transfers (EP0)
+		context.requestPool = new ThreadPoolExecutor(endpointCount + 1, endpointCount + 1,
 				Long.MAX_VALUE, TimeUnit.DAYS,
 				new LinkedBlockingQueue<>(), new ThreadPoolExecutor.DiscardPolicy());
 		
@@ -808,6 +916,8 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 		
 		connections.put(dev.getDeviceId(), context);
 		socketMap.put(s, context);
+		
+		System.out.printf("attachToDevice: complete, %d endpoints, ready for transfers\n", endpointCount);
 		
 		updateNotification();
 		return true;
@@ -881,7 +991,9 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 			}
 		}
 		
-		System.out.println("Removed URB? " + (found ? "yes" : "no"));
+		if (DEBUG) {
+			System.out.println("Removed URB? " + (found ? "yes" : "no"));
+		}
 		sendReply(s, reply,
 				found ? UsbIpSubmitUrb.USBIP_STATUS_URB_ABORTED :
 					-22); // EINVAL

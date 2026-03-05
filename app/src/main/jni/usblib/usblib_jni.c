@@ -7,6 +7,56 @@
 #include <sys/ioctl.h>
 
 JNIEXPORT jint JNICALL
+Java_org_cgutman_usbip_jni_UsbLib_clearHalt(
+        JNIEnv *env, jclass clazz, jint fd, jint endpoint)
+{
+    unsigned int ep = endpoint;
+    jint res = TEMP_FAILURE_RETRY(ioctl(fd, USBDEVFS_CLEAR_HALT, &ep));
+    if (res < 0) {
+        res = -errno;
+    }
+    return res;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_cgutman_usbip_jni_UsbLib_disconnectKernelDriver(
+        JNIEnv *env, jclass clazz, jint fd, jint interfaceNum)
+{
+    struct usbdevfs_ioctl cmd;
+    cmd.ifno = interfaceNum;
+    cmd.ioctl_code = USBDEVFS_DISCONNECT;
+    cmd.data = NULL;
+    jint res = TEMP_FAILURE_RETRY(ioctl(fd, USBDEVFS_IOCTL, &cmd));
+    if (res < 0) {
+        res = -errno;
+    }
+    return res;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_cgutman_usbip_jni_UsbLib_resetDevice(
+        JNIEnv *env, jclass clazz, jint fd)
+{
+    jint res = TEMP_FAILURE_RETRY(ioctl(fd, USBDEVFS_RESET, NULL));
+    if (res < 0) {
+        res = -errno;
+    }
+    return res;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_cgutman_usbip_jni_UsbLib_resetEp(
+        JNIEnv *env, jclass clazz, jint fd, jint endpoint)
+{
+    unsigned int ep = endpoint;
+    jint res = TEMP_FAILURE_RETRY(ioctl(fd, USBDEVFS_RESETEP, &ep));
+    if (res < 0) {
+        res = -errno;
+    }
+    return res;
+}
+
+JNIEXPORT jint JNICALL
 Java_org_cgutman_usbip_jni_UsbLib_doBulkTransfer(
         JNIEnv *env, jclass clazz, jint fd, jint endpoint, jbyteArray data, jint timeout)
 {

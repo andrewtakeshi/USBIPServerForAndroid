@@ -34,7 +34,6 @@ public class UsbIpServer {
 		}
 		
 		boolean res = false;
-		System.out.printf("In code: 0x%x\n", inMsg.code);
 		if (inMsg.code == ProtoDefs.OP_REQ_DEVLIST) {
 			DevListReply dlReply = new DevListReply(inMsg.version);
 			dlReply.devInfoList = handler.getDevices();
@@ -67,7 +66,6 @@ public class UsbIpServer {
 			return false;
 		}
 		
-		System.out.printf("Out code: 0x%x\n", outMsg.code);
 		s.getOutputStream().write(outMsg.serialize());
 		return res;
 	}
@@ -144,7 +142,9 @@ public class UsbIpServer {
 						handleClient(serverSock.accept());
 					}
 				} catch (IOException e) {
-					e.printStackTrace();
+					if (!isInterrupted() && serverSock != null && !serverSock.isClosed()) {
+						e.printStackTrace();
+					}
 					return;
 				}
 			}

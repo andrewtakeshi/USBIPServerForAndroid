@@ -3,6 +3,8 @@ package org.cgutman.usbip.config;
 import org.cgutman.usbip.service.UsbIpService;
 import org.cgutman.usbipserverforandroid.R;
 
+import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbManager;
 import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
@@ -63,6 +65,10 @@ public class UsbIpConfig extends ComponentActivity {
 		super.onCreate(savedInstanceState);
 		setContentView(R.layout.activity_usbip_config);
 
+		// Handle USB_DEVICE_ATTACHED intent — opening the device here
+		// grants implicit permission that the service can use later
+		handleUsbIntent(getIntent());
+
 		// Apply WindowInsets for edge-to-edge on API 35+
 		if (Build.VERSION.SDK_INT >= 35) {
 			View rootLayout = findViewById(R.id.rootLayout);
@@ -99,5 +105,27 @@ public class UsbIpConfig extends ComponentActivity {
 				updateStatus();
 			}
 		});
+	}
+
+	@Override
+	protected void onNewIntent(Intent intent) {
+		super.onNewIntent(intent);
+		handleUsbIntent(intent);
+	}
+
+	private void handleUsbIntent(Intent intent) {
+		if (intent != null && UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(intent.getAction())) {
+			UsbDevice dev;
+			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+				dev = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice.class);
+			} else {
+				dev = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+			}
+			if (dev != null) {
+				UsbManager usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+				System.out.printf("USB device attached via intent: vid=%04x pid=%04x hasPermission=%b\n",
+						dev.getVendorId(), dev.getProductId(), usbManager.hasPermission(dev));
+			}
+		}
 	}
 }
