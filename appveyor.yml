@@ -8,6 +8,7 @@ before_build:
   - 'mklink /D C:\android-sdk "C:\Program Files (x86)\Android\android-sdk"'
   - 'set ANDROID_HOME=C:\android-sdk'
   - 'set JAVA_HOME=C:\Program Files\Java\jdk17'
+  - 'C:\android-sdk\cmdline-tools\latest\bin\sdkmanager.bat "platforms;android-36"'
 
 build_script:
   - gradlew.bat build connectedCheck

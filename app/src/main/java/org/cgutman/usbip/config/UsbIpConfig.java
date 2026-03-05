@@ -4,8 +4,6 @@ import org.cgutman.usbip.service.UsbIpService;
 import org.cgutman.usbipserverforandroid.R;
 
 import android.Manifest;
-import android.app.ActivityManager;
-import android.app.ActivityManager.RunningServiceInfo;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -31,7 +29,7 @@ public class UsbIpConfig extends ComponentActivity {
 	private ActivityResultLauncher<String> requestPermissionLauncher =
 			registerForActivityResult(new ActivityResultContracts.RequestPermission(), isGranted -> {
 				// We don't actually care if the permission is granted or not. We will launch the service anyway.
-				startService(new Intent(UsbIpConfig.this, UsbIpService.class));
+				launchService();
 			});
 	
 	private void updateStatus() {
@@ -46,22 +44,34 @@ public class UsbIpConfig extends ComponentActivity {
 			serviceReadyText.setText("");
 		}
 	}
+	private void launchService() {
+		Intent intent = new Intent(this, UsbIpService.class);
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+			startForegroundService(intent);
+		} else {
+			startService(intent);
+		}
+	}
+
 	
-	// Elegant Stack Overflow solution to querying running services
 	private boolean isMyServiceRunning(Class<?> serviceClass) {
-	    ActivityManager manager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-	    for (RunningServiceInfo service : manager.getRunningServices(Integer.MAX_VALUE)) {
-	        if (serviceClass.getName().equals(service.service.getClassName())) {
-	            return true;
-	        }
-	    }
-	    return false;
+		return UsbIpService.isRunning;
 	}
 	
 	@Override
 	protected void onCreate(Bundle savedInstanceState) {
 		super.onCreate(savedInstanceState);
 		setContentView(R.layout.activity_usbip_config);
+
+		// Apply WindowInsets for edge-to-edge on API 35+
+		if (Build.VERSION.SDK_INT >= 35) {
+			View rootLayout = findViewById(R.id.rootLayout);
+			androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(rootLayout, (v, windowInsets) -> {
+				androidx.core.graphics.Insets insets = windowInsets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars());
+				v.setPadding(insets.left, insets.top, insets.right, insets.bottom);
+				return androidx.core.view.WindowInsetsCompat.CONSUMED;
+			});
+		}
 
 		serviceButton = findViewById(R.id.serviceButton);
 		serviceStatus = findViewById(R.id.serviceStatus);
@@ -79,7 +89,7 @@ public class UsbIpConfig extends ComponentActivity {
 				}
 				else {
 					if (ContextCompat.checkSelfPermission(UsbIpConfig.this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
-						startService(new Intent(UsbIpConfig.this, UsbIpService.class));
+						launchService();
 					} else {
 						requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
 					}

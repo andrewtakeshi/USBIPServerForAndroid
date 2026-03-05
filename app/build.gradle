@@ -4,12 +4,12 @@ android {
     ndkVersion "27.0.12077973"
 
     namespace "org.cgutman.usbipserverforandroid"
-    compileSdk 34
+    compileSdk 36
 
     defaultConfig {
         applicationId "org.cgutman.usbipserverforandroid"
         minSdk 21
-        targetSdk 34
+        targetSdk 36
     }
 
     buildTypes {
@@ -27,8 +27,8 @@ android {
 }
 
 dependencies {
-    implementation 'androidx.core:core:1.13.1'
-    implementation 'androidx.activity:activity:1.9.1'
+    implementation 'androidx.core:core:1.16.0'
+    implementation 'androidx.activity:activity:1.10.1'
 }
 
 configurations.implementation {

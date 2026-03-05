@@ -53,8 +53,11 @@ import android.os.PowerManager.WakeLock;
 import android.util.SparseArray;
 
 import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
 
 public class UsbIpService extends Service implements UsbRequestHandler {
+	
+	public static volatile boolean isRunning = false;
 	
 	private UsbManager usbManager;
 	
@@ -79,7 +82,12 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 		public void onReceive(Context context, Intent intent) {
 			String action = intent.getAction();
 			if (ACTION_USB_PERMISSION.equals(action)) {
-				UsbDevice dev = (UsbDevice)intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+				UsbDevice dev;
+				if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+					dev = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice.class);
+				} else {
+					dev = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+				}
 
 				synchronized (dev) {
 					permission.put(dev.getDeviceId(), intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false));
@@ -120,11 +128,14 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 		startForeground(NOTIFICATION_ID, builder.build());
 	}
 	
-	@SuppressLint({"UseSparseArrays", "UnspecifiedRegisterReceiverFlag"})
+	@SuppressLint("UseSparseArrays")
 	@Override
 	public void onCreate() {
 		super.onCreate();
 		
+		isRunning = true;
+		
+		// Initialize fields
 		usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);		
 		connections = new SparseArray<>();
 		permission = new SparseArray<>();
@@ -140,42 +151,66 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 		i.setPackage(getPackageName());
 
 		usbPermissionIntent = PendingIntent.getBroadcast(this, 0, i, intentFlags);
-		IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-			registerReceiver(usbReceiver, filter, RECEIVER_NOT_EXPORTED);
-		}
-		else {
-			registerReceiver(usbReceiver, filter);
+		
+		// Create notification channel before calling startForeground()
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+			NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Service Info", NotificationManager.IMPORTANCE_LOW);
+			NotificationManager notificationManager = getSystemService(NotificationManager.class);
+			notificationManager.createNotificationChannel(channel);
 		}
 		
+		// Call startForeground() early to comply with Android 14+ timing requirements
+		try {
+			updateNotification();
+		} catch (Exception e) {
+			// Handle ForegroundServiceStartNotAllowedException (API 31+) and
+			// InvalidForegroundServiceTypeException (API 34+)
+			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+				e.getClass().getName().equals("android.app.ForegroundServiceStartNotAllowedException")) {
+				System.err.println("Failed to start foreground service: ForegroundServiceStartNotAllowedException - " + e.getMessage());
+				stopSelf();
+				return;
+			} else if (Build.VERSION.SDK_INT >= 34 &&
+				e.getClass().getName().equals("android.app.ForegroundServiceTypeException")) {
+				System.err.println("Failed to start foreground service: InvalidForegroundServiceTypeException - " + e.getMessage());
+				stopSelf();
+				return;
+			}
+			// Re-throw if it's a different exception
+			throw e;
+		}
+		
+		// Register broadcast receiver
+		IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
+		ContextCompat.registerReceiver(this, usbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED);
+		
+		// Acquire wake locks
 		PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
 		WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
 		
 		cpuWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "USBIPServerForAndroid:Service");
 		cpuWakeLock.acquire();
 		
-		highPerfWifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "USBIPServerForAndroid:Service:HP");
-		highPerfWifiLock.acquire();
-
+		// Acquire Wi-Fi lock based on API level
+		// API 29+: Use WIFI_MODE_FULL_LOW_LATENCY (supersedes HIGH_PERF)
+		// API < 29: Use WIFI_MODE_FULL_HIGH_PERF (LOW_LATENCY unavailable)
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
 			lowLatencyWifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "USBIPServerForAndroid:Service:LL");
 			lowLatencyWifiLock.acquire();
+		} else {
+			highPerfWifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "USBIPServerForAndroid:Service:HP");
+			highPerfWifiLock.acquire();
 		}
 		
+		// Start the TCP server
 		server = new UsbIpServer();
 		server.start(this);
-
-		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-			NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Service Info", NotificationManager.IMPORTANCE_DEFAULT);
-			NotificationManager notificationManager = getSystemService(NotificationManager.class);
-			notificationManager.createNotificationChannel(channel);
-		}
-		
-		updateNotification();
 	}
 	
 	public void onDestroy() {
 		super.onDestroy();
+		
+		isRunning = false;
 		
 		server.stop();
 		unregisterReceiver(usbReceiver);
@@ -183,7 +218,9 @@ public class UsbIpService extends Service implements UsbRequestHandler {
 		if (lowLatencyWifiLock != null) {
 			lowLatencyWifiLock.release();
 		}
-		highPerfWifiLock.release();
+		if (highPerfWifiLock != null) {
+			highPerfWifiLock.release();
+		}
 		cpuWakeLock.release();
 	}
 	
